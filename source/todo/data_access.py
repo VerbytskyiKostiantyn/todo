@@ -846,6 +846,144 @@ class DataAccess():
 		""", (tid,))
 		self.connection.commit()
 
+	def get_statistics(self, context='', period_start=None):
+		"""
+		Get comprehensive statistics about tasks.
+		
+		Args:
+			context: Context path to filter statistics (empty string for all)
+			period_start: Optional datetime string to limit stats to tasks created after this date
+		
+		Returns:
+			Dictionary with various statistics
+		"""
+		c = self.connection.cursor()
+		
+		# Base context filter
+		context_filter = ''
+		context_params = []
+		if context:
+			context_filter = 'AND c.path LIKE ?'
+			context_params = ['{}%'.format(context)]
+		
+		# Period filter
+		period_filter = ''
+		period_params = []
+		if period_start:
+			period_filter = 'AND t.created >= ?'
+			period_params = [period_start]
+		
+		stats = {}
+		
+		# Total tasks
+		c.execute(f"""
+			SELECT COUNT(*)
+			FROM Task t
+			JOIN Context c ON t.context = c.id
+			WHERE 1=1 {context_filter} {period_filter}
+		""", context_params + period_params)
+		stats['total_tasks'] = c.fetchone()[0]
+		
+		# Completed tasks
+		c.execute(f"""
+			SELECT COUNT(*)
+			FROM Task t
+			JOIN Context c ON t.context = c.id
+			WHERE t.done IS NOT NULL {context_filter} {period_filter}
+		""", context_params + period_params)
+		stats['completed_tasks'] = c.fetchone()[0]
+		
+		# Pending tasks
+		stats['pending_tasks'] = stats['total_tasks'] - stats['completed_tasks']
+		
+		# Overdue tasks (deadline in the past, not done)
+		c.execute(f"""
+			SELECT COUNT(*)
+			FROM Task t
+			JOIN Context c ON t.context = c.id
+			WHERE t.done IS NULL
+			  AND t.deadline IS NOT NULL
+			  AND datetime(t.deadline) < datetime('now')
+			  {context_filter} {period_filter}
+		""", context_params + period_params)
+		stats['overdue_tasks'] = c.fetchone()[0]
+		
+		# Average completion time (in days)
+		c.execute(f"""
+			SELECT AVG(julianday(done) - julianday(created))
+			FROM Task t
+			JOIN Context c ON t.context = c.id
+			WHERE t.done IS NOT NULL {context_filter} {period_filter}
+		""", context_params + period_params)
+		result = c.fetchone()[0]
+		stats['avg_completion_days'] = round(result, 1) if result else None
+		
+		# Tasks by priority
+		c.execute(f"""
+			SELECT t.priority, COUNT(*)
+			FROM Task t
+			JOIN Context c ON t.context = c.id
+			WHERE t.done IS NULL {context_filter} {period_filter}
+			GROUP BY t.priority
+			ORDER BY t.priority DESC
+		""", context_params + period_params)
+		stats['tasks_by_priority'] = dict(c.fetchall())
+		
+		# Top 5 contexts by task count
+		c.execute(f"""
+			SELECT c.path, COUNT(t.id) as task_count
+			FROM Context c
+			LEFT JOIN Task t ON t.context = c.id
+			WHERE 1=1 {context_filter} {period_filter}
+			GROUP BY c.path
+			ORDER BY task_count DESC
+			LIMIT 5
+		""", context_params + period_params)
+		stats['top_contexts'] = [(userify_context(path), count) for path, count in c.fetchall()]
+		
+		# Tasks completed in last 7 days
+		c.execute(f"""
+			SELECT COUNT(*)
+			FROM Task t
+			JOIN Context c ON t.context = c.id
+			WHERE t.done IS NOT NULL
+			  AND datetime(t.done) >= datetime('now', '-7 days')
+			  {context_filter}
+		""", context_params)
+		stats['completed_last_7_days'] = c.fetchone()[0]
+		
+		# Tasks completed in last 30 days
+		c.execute(f"""
+			SELECT COUNT(*)
+			FROM Task t
+			JOIN Context c ON t.context = c.id
+			WHERE t.done IS NOT NULL
+			  AND datetime(t.done) >= datetime('now', '-30 days')
+			  {context_filter}
+		""", context_params)
+		stats['completed_last_30_days'] = c.fetchone()[0]
+		
+		# Tasks with dependencies
+		c.execute(f"""
+			SELECT COUNT(DISTINCT t.id)
+			FROM Task t
+			JOIN Context c ON t.context = c.id
+			JOIN TaskDependency td ON t.id = td.task_id
+			WHERE 1=1 {context_filter} {period_filter}
+		""", context_params + period_params)
+		stats['tasks_with_dependencies'] = c.fetchone()[0]
+		
+		# Recurring tasks
+		c.execute(f"""
+			SELECT COUNT(*)
+			FROM Task t
+			JOIN Context c ON t.context = c.id
+			WHERE t.period IS NOT NULL {context_filter} {period_filter}
+		""", context_params + period_params)
+		stats['recurring_tasks'] = c.fetchone()[0]
+		
+		return stats
+
 	def exit(self, save=True):
 		""" Close the database and save all operations done to it if `save` is
 		True. Write all contexts paths (NON fully-dotted) to the contexts file

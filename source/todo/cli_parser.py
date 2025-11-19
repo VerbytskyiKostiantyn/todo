@@ -28,7 +28,7 @@ USER_DATE_FORMATS = [
 COMMANDS = {
 	'add', 'done', 'task', 'edit', 'rm', 'ctx', 'contexts', 'history',
 	'purge', 'mv', 'rmctx', 'search', 'future', '-h', '--help', '--location',
-	'--version', '--install-autocompletion', 'undone', 'ping'}
+	'--version', '--install-autocompletion', 'undone', 'ping', 'stats'}
 
 
 ## Argument parsing error messages
@@ -189,6 +189,9 @@ PARSERS = [
 	('depends_on', parse_dependencies),
 	('front', parse_toggle),
 ]
+
+# Note: 'period' is used both for recurring tasks and stats period.
+# For stats command specifically, we'll handle the period parsing in the handler.
 
 
 def parse_args(args):
@@ -423,6 +426,17 @@ def parse_command(argv):
 	ping_parser.set_defaults(command='ping')
 	ping_parser.add_argument('id', nargs='+',
 		help="The list of tasks' IDs to ping",
+	)
+
+	stats_parser = subparsers.add_parser('stats',
+		help="Show statistics about your tasks"
+	)
+	stats_parser.set_defaults(command='stats')
+	stats_parser.add_argument('-c', '--context',
+		help="Restrict statistics to a specific context"
+	)
+	stats_parser.add_argument('--period',
+		help="Time period for statistics (e.g., 7d, 30d, 1w). Defaults to all time"
 	)
 
 	return vars(parser.parse_args(argv))

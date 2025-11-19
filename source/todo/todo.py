@@ -2,7 +2,7 @@
 
 import os, sys, sqlite3, functools, configparser, textwrap
 import os.path as op
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from typing import List
 
 from . import cli_parser, utils, data_access, core
@@ -451,6 +451,50 @@ def ping_task(args, daccess):
 	return 'multiple_tasks_update', not_found
 
 
+def show_statistics(args, daccess):
+	"""Handler for the stats command"""
+	context = args.get('context')
+	if context is None:
+		context = ''
+	
+	# Parse period if provided
+	period_start = None
+	period_display = None
+	if args.get('period'):
+		raw_period = args['period']
+		# If it's already parsed as int (from parse_args), we need the original string
+		if isinstance(raw_period, int):
+			# It was already parsed, use it directly
+			period_delta = timedelta(seconds=raw_period)
+			period_start_dt = NOW - period_delta
+			period_start = period_start_dt.strftime(utils.SQLITE_DT_FORMAT)
+			# Try to reconstruct display string from seconds
+			days = raw_period // (24 * 3600)
+			if days > 0:
+				period_display = f"{days} day{'s' if days > 1 else ''}"
+			else:
+				weeks = raw_period // (7 * 24 * 3600)
+				if weeks > 0:
+					period_display = f"{weeks} week{'s' if weeks > 1 else ''}"
+				else:
+					period_display = str(raw_period)
+		else:
+			# Parse the period string manually (e.g., "7d", "30d", "1w")
+			period_display = raw_period
+			success, parsed = cli_parser.parse_period(raw_period)
+			if success:
+				# Convert period (seconds) to a datetime in the past
+				period_delta = timedelta(seconds=parsed)
+				period_start_dt = NOW - period_delta
+				period_start = period_start_dt.strftime(utils.SQLITE_DT_FORMAT)
+			else:
+				# Invalid period format
+				return 'invalid_period', raw_period
+	
+	stats = daccess.get_statistics(context, period_start)
+	return 'statistics', stats, context, period_display
+
+
 ## DISPATCHING
 
 # Map of the names of the commands to handlers defined above.
@@ -471,6 +515,7 @@ DISPATCHER = {
 	'search': search,
 	'future': list_future_tasks,
 	'ping': ping_task,
+	'stats': show_statistics,
 }
 
 
@@ -636,6 +681,91 @@ def feedback_history(tasks, gid):
 def feedback_purge(count):
 	s = 's' if count > 1 else ''
 	print('{} task{} deleted'.format(count, s))
+
+
+def feedback_statistics(stats, context, period):
+	"""Print statistics in a nice formatted way"""
+	print()
+	print(cstr('=' * 60, clr('id')))
+	
+	# Header
+	if context:
+		ctx_display = utils.get_relative_path('', context)
+		print(cstr('  TASK STATISTICS', clr('priority')).center(60))
+		print(cstr(f'  Context: {ctx_display}', clr('context')).center(60))
+	else:
+		print(cstr('  TASK STATISTICS (ALL CONTEXTS)', clr('priority')).center(60))
+	
+	if period:
+		print(cstr(f'  Period: last {period}', clr('deadline')).center(60))
+	
+	print(cstr('=' * 60, clr('id')))
+	print()
+	
+	# Overview section
+	print(cstr('OVERVIEW', clr('priority')))
+	print(cstr('-' * 60, clr('id')))
+	
+	total = stats['total_tasks']
+	completed = stats['completed_tasks']
+	pending = stats['pending_tasks']
+	
+	completion_rate = (completed / total * 100) if total > 0 else 0
+	
+	print(f"  Total tasks:        {cstr(str(total), clr('id'))}")
+	print(f"  Completed tasks:    {cstr(str(completed), clr('done'))} ({completion_rate:.1f}%)")
+	print(f"  Pending tasks:      {cstr(str(pending), clr('deadline'))}")
+	print(f"  Overdue tasks:      {cstr(str(stats['overdue_tasks']), clr('deadline'))}")
+	
+	if stats['avg_completion_days'] is not None:
+		avg_days = stats['avg_completion_days']
+		print(f"  Avg completion:     {cstr(f'{avg_days} days', clr('context'))}")
+	
+	print()
+	
+	# Productivity section
+	print(cstr('PRODUCTIVITY', clr('priority')))
+	print(cstr('-' * 60, clr('id')))
+	print(f"  Last 7 days:        {cstr(str(stats['completed_last_7_days']), clr('done'))} tasks completed")
+	print(f"  Last 30 days:       {cstr(str(stats['completed_last_30_days']), clr('done'))} tasks completed")
+	print()
+	
+	# Priority distribution
+	if stats['tasks_by_priority']:
+		print(cstr('TASKS BY PRIORITY (pending only)', clr('priority')))
+		print(cstr('-' * 60, clr('id')))
+		for priority, count in sorted(stats['tasks_by_priority'].items(), reverse=True):
+			bar_length = min(40, count)
+			bar = '#' * bar_length
+			print(f"  Priority {cstr(str(priority), clr('priority'))}: {cstr(bar, clr('priority'))} {count}")
+		print()
+	
+	# Top contexts
+	if stats['top_contexts'] and not context:
+		print(cstr('TOP CONTEXTS', clr('priority')))
+		print(cstr('-' * 60, clr('id')))
+		for ctx_path, count in stats['top_contexts']:
+			if ctx_path == '':
+				ctx_path = '(root)'
+			if count > 0:
+				bar_length = min(30, count)
+				bar = '*' * bar_length
+				print(f"  {cstr(ctx_path, clr('context')):30s} {bar} {count}")
+		print()
+	
+	# Additional info
+	print(cstr('ADDITIONAL INFO', clr('priority')))
+	print(cstr('-' * 60, clr('id')))
+	print(f"  Recurring tasks:    {cstr(str(stats['recurring_tasks']), clr('context'))}")
+	print(f"  With dependencies:  {cstr(str(stats['tasks_with_dependencies']), clr('depends_on'))}")
+	print()
+	print(cstr('=' * 60, clr('id')))
+	print()
+
+
+def feedback_invalid_period(period):
+	print(f"Invalid period format: {period}")
+	print("Use format like: 7d (7 days), 2w (2 weeks), 30d (30 days)")
 
 
 def feedback_show_task(task, full_content):
